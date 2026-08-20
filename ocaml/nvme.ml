@@ -1,11 +1,12 @@
 type error =
-  | Driver of { code : int; message : string }
+  | Driver of { code : Ffi.error_code; message : string }
   | Controller of { status : Status.decoded; command_id : int }
   | Timeout of string
   | Bad_argument of string
 
 let string_of_error = function
-  | Driver { code; message } -> Printf.sprintf "Driver error %d: %s" code message
+  | Driver { code; message } ->
+    Printf.sprintf "Driver error %s: %s" (Ffi.error_code_name code) message
   | Controller { status; command_id } ->
     Printf.sprintf "Command %d failed: %s" command_id (Status.describe status)
   | Timeout what -> Printf.sprintf "Timed out waiting for %s" what
@@ -78,7 +79,11 @@ let default_slot_bytes = 128 * 1024
 
 let driver_error device code =
   let message = Ffi.dev_error device in
-  Driver { code; message = (if message = "" then Ffi.strerror code else message) }
+  Driver
+    {
+      code = Ffi.decode_error_code code;
+      message = (if message = "" then Ffi.strerror code else message);
+    }
 
 let make_queue ~qid ~depth ~vector ~data_buffer ~slot_bytes =
   let free_tags = Stack.create () in
@@ -126,12 +131,12 @@ let open_device ?(config = default_config) bdf =
     }
   in
   match Ffi.dev_open bdf ffi_config with
-  | Error message -> Error (Driver { code = Ffi.err_backend; message })
+  | Error message -> Error (Driver { code = Ffi.Backend; message })
   | Ok handle -> (
     match Ffi.dma_alloc handle scratch_bytes with
     | Error message -> 
       ignore (Ffi.dev_close handle);
-      Error (Driver { code = Ffi.err_nomem; message })
+      Error (Driver { code = Ffi.No_memory; message })
     | Ok scratch ->
       let admin =
         make_queue ~qid:0 ~depth:config.admin_queue_depth ~vector:0 ~data_buffer:scratch
@@ -216,7 +221,7 @@ let reap_once device queue timeout_ms =
 
 let submit device queue sqe =
   match acquire_tag queue with
-  | None -> Error (Driver { code = Ffi.err_queue_full; message = "No free command identifiers" })
+  | None -> Error (Driver { code = Ffi.Queue_full; message = "No free command identifiers" })
   | Some tag ->
     Cmd.set_opcode_cid sqe
       ~opcode:(Int32.to_int (Cmd.get_dword sqe 0) land 0xff)
@@ -348,10 +353,10 @@ let create_io_queue ?(depth = 32) ?(slot_bytes = default_slot_bytes) device =
     if allocate_code <> Ffi.ok then Error (driver_error device.handle allocate_code)
     else
       match Ffi.io_queue_addresses device.handle qid with
-      | Error message -> Error (Driver { code = Ffi.err_state; message })
+      | Error message -> Error (Driver { code = Ffi.State; message })
       | Ok (sq_iova, cq_iova) -> (
         match Ffi.dma_alloc device.handle (depth * slot_bytes) with
-        | Error message -> Error (Driver { code = Ffi.err_nomem; message })
+        | Error message -> Error (Driver { code = Ffi.No_memory; message })
         | Ok data_buffer ->
           let vector = if device.interrupt_vectors > qid then qid else 0 in
           let interrupts = device.interrupt_vectors > 0 in
@@ -418,7 +423,7 @@ let prepare_transfer device queue tag sqe length =
 
 let submit_transfer ?payload device queue sqe length =
   match acquire_tag queue with
-  | None -> Error (Driver { code = Ffi.err_queue_full; message = "No free command identifiers" })
+  | None -> Error (Driver { code = Ffi.Queue_full; message = "No free command identifiers" })
   | Some tag -> (
     Cmd.set_opcode_cid sqe
       ~opcode:(Int32.to_int (Cmd.get_dword sqe 0) land 0xff)

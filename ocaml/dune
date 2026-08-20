@@ -1,7 +1,7 @@
 (library
  (name lantern)
  (public_name lantern)
- (wrapped false)
+ (wrapped true)
  (libraries unix)
  (foreign_archives ../c/dma)
  (foreign_stubs

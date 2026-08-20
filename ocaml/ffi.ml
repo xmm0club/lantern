@@ -65,6 +65,42 @@ let err_queue_full = -7
 let err_state = -8
 let err_range = -9
 
+type error_code =
+  | Invalid
+  | Backend
+  | No_device
+  | Timeout
+  | No_memory
+  | Controller_fault
+  | Queue_full
+  | State
+  | Range
+  | Unknown of int
+
+let decode_error_code code =
+  if code = err_invalid then Invalid
+  else if code = err_backend then Backend
+  else if code = err_no_device then No_device
+  else if code = err_timeout then Timeout
+  else if code = err_nomem then No_memory
+  else if code = err_controller then Controller_fault
+  else if code = err_queue_full then Queue_full
+  else if code = err_state then State
+  else if code = err_range then Range
+  else Unknown code
+
+let error_code_name = function
+  | Invalid -> "invalid"
+  | Backend -> "backend"
+  | No_device -> "no_device"
+  | Timeout -> "timeout"
+  | No_memory -> "no_memory"
+  | Controller_fault -> "controller"
+  | Queue_full -> "queue_full"
+  | State -> "state"
+  | Range -> "range"
+  | Unknown code -> Printf.sprintf "unknown(%d)" code
+
 let backend_vfio = 0
 let backend_mock = 1
 

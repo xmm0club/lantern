@@ -1,5 +1,5 @@
 type error =
-  | Driver of { code : int; message : string }
+  | Driver of { code : Ffi.error_code; message : string }
   | Controller of { status : Status.decoded; command_id : int }
   | Timeout of string
   | Bad_argument of string
