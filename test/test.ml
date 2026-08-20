@@ -43,7 +43,7 @@ let config ?(interrupts = false) ?(block_size = 512) () =
   }
 
 let with_device ?(interrupts = false) ?(block_size = 512) name body =
-  match Nvme.open_device ~config:(config ~interrupts ~block_size ()) "0000:00:04.0" with
+  match Nvme.open_device ~config:(config ~interrupts ~block_size ()) Defaults.bdf with
   | Error error ->
     check (name ^ " :: " ^ Nvme.string_of_error error) false
   | Ok device ->

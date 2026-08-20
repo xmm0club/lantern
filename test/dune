@@ -5,24 +5,34 @@
  (include_dirs ../c)
  (flags :standard -O2 -Wall -Wextra))
 
+; defaults.env is the single source of truth for the mock BDF and selftest
+; image name; scripts/test.sh reads the same file directly. defaults.ml is
+; generated from it so runner.ml and test.ml never hardcode the values.
+(rule
+ (target defaults.ml)
+ (deps defaults.env ../scripts/gen_test_defaults.sh)
+ (action
+  (with-stdout-to defaults.ml
+   (run bash ../scripts/gen_test_defaults.sh %{read-lines:defaults.env}))))
+
 (executable
  (name runner)
- (modules runner)
+ (modules runner defaults)
  (libraries lantern)
  (foreign_archives selftest ../c/dma)
  (flags (:standard -warn-error -a)))
 
 (executable
  (name test)
- (modules test)
+ (modules test defaults)
  (libraries lantern unix)
  (flags (:standard -warn-error -a)))
 
 (rule
  (alias runtest)
- (deps runner.exe)
+ (deps runner.exe defaults.env)
  (action
-  (run ./runner.exe 0000:00:04.0 selftest.img)))
+  (run ./runner.exe %{read-lines:defaults.env})))
 
 (rule
  (alias runtest)
