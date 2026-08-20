@@ -1,0 +1,31 @@
+(foreign_library
+ (archive_name selftest)
+ (language c)
+ (names selftest)
+ (include_dirs ../c)
+ (flags :standard -O2 -Wall -Wextra))
+
+(executable
+ (name runner)
+ (modules runner)
+ (libraries lantern)
+ (foreign_archives selftest ../c/dma)
+ (flags (:standard -warn-error -a)))
+
+(executable
+ (name test)
+ (modules test)
+ (libraries lantern unix)
+ (flags (:standard -warn-error -a)))
+
+(rule
+ (alias runtest)
+ (deps runner.exe)
+ (action
+  (run ./runner.exe 0000:00:04.0 selftest.img)))
+
+(rule
+ (alias runtest)
+ (deps test.exe)
+ (action
+  (run ./test.exe)))

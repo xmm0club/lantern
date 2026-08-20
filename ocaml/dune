@@ -1,0 +1,13 @@
+(library
+ (name lantern)
+ (public_name lantern)
+ (wrapped false)
+ (libraries unix)
+ (foreign_archives ../c/dma)
+ (foreign_stubs
+  (language c)
+  (names stub)
+  (include_dirs ../c)
+  (flags :standard -O2 -Wall -Wextra))
+ (c_library_flags (-lpthread))
+ (flags (:standard -warn-error -a)))

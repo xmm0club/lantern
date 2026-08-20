@@ -1,0 +1,5 @@
+(executable
+ (name tool)
+ (public_name nvme-tool)
+ (libraries lantern cmdliner unix)
+ (flags (:standard -warn-error -a)))

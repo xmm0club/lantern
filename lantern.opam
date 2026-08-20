@@ -1,0 +1,17 @@
+opam-version: "2.0"
+name: "lantern"
+version: "0.1.0"
+synopsis: "Userspace NVMe driver over VFIO with an OCaml control plane"
+maintainer: "lantern"
+authors: "lantern"
+license: "MIT"
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+  ["dune" "runtest" "-p" name "-j" jobs] {with-test}
+]
+depends: [
+  "ocaml" {>= "4.14.0"}
+  "dune" {>= "3.0.0" & build}
+  "cmdliner" {>= "1.2.0" & < "2.0.0"}
+]
+available: [ os = "linux" & arch = "x86_64" ]

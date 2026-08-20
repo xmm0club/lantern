@@ -1,0 +1,5 @@
+(foreign_library
+ (archive_name dma)
+ (language c)
+ (names dma real mock model)
+ (flags :standard -O2 -Wall -Wextra))
