@@ -211,7 +211,7 @@ let tag_tests () =
               Nvme.Pipeline.submit_read device queue ~nsid:1 ~lba:0L ~blocks:1 ~block_bytes:block
             with
             | Ok slot -> fill (index + 1) (slot :: acc)
-            | Error (Nvme.Driver { code; _ }) when code = Ffi.err_queue_full -> (index, acc)
+            | Error (Nvme.Driver { code = Ffi.Queue_full; _ }) -> (index, acc)
             | Error error ->
               check ("Unexpected submission failure :: " ^ Nvme.string_of_error error) false;
               (index, acc)

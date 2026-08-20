@@ -340,7 +340,7 @@ let bench_command common pattern total_size io_size queues seed operation =
                     ~blocks:blocks_per_io ~block_bytes
               in
               match result with
-              | Error (Nvme.Driver { code; _ }) when code = Ffi.err_queue_full -> false
+              | Error (Nvme.Driver { code = Ffi.Queue_full; _ }) -> false
               | Error error ->
                 failure := Some error;
                 false
