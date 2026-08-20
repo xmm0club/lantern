@@ -49,6 +49,7 @@ typedef struct {
 
 struct nvme_dev {
     const struct lt_syscall_ops *ops;
+    lt_mock_handle_t *mock;
     char     bdf[16];
     int      backend;
     int      container_fd;
@@ -985,10 +986,14 @@ int nvme_dev_open(const char *bdf, const nvme_dev_config_t *config, nvme_dev_t *
         if (config->mock_model)
             mock.model = config->mock_model;
         mock.queue_latency_us = config->mock_latency_us;
-        if (lt_mock_arm(&mock) != 0) {
-            set_error(dev, "Mock backend refused to start: %s", lt_mock_last_error());
-            free(dev);
-            return NVME_DMA_ERR_BACKEND;
+        {
+            char mock_error[LANTERN_ERROR_LEN];
+            dev->mock = lt_mock_arm(&mock, mock_error, sizeof(mock_error));
+            if (!dev->mock) {
+                set_error(dev, "Mock backend refused to start: %s", mock_error);
+                free(dev);
+                return NVME_DMA_ERR_BACKEND;
+            }
         }
         dev->ops = lt_syscalls_mock();
     } else {
@@ -1117,7 +1122,7 @@ int nvme_dev_close(nvme_dev_t *dev)
         dev->ops->close(dev->container_fd);
 
     if (dev->backend == NVME_DMA_BACKEND_MOCK)
-        lt_mock_disarm();
+        lt_mock_disarm(dev->mock);
 
     free(dev);
     return NVME_DMA_OK;

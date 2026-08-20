@@ -27,12 +27,13 @@ typedef struct {
     const char *model;
 } lt_mock_config_t;
 
+typedef struct lt_mock_state lt_mock_handle_t;
+
 const struct lt_syscall_ops *lt_syscalls_real(void);
 const struct lt_syscall_ops *lt_syscalls_mock(void);
 
 void lt_mock_config_defaults(lt_mock_config_t *cfg);
-int  lt_mock_arm(const lt_mock_config_t *cfg);
-void lt_mock_disarm(void);
-const char *lt_mock_last_error(void);
+lt_mock_handle_t *lt_mock_arm(const lt_mock_config_t *cfg, char *errbuf, size_t errlen);
+void               lt_mock_disarm(lt_mock_handle_t *handle);
 
 #endif

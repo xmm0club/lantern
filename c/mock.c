@@ -26,21 +26,35 @@ typedef enum {
     MOCK_OBJECT_DEVICE
 } mock_object_kind_t;
 
+struct lt_mock_state {
+    pthread_mutex_t lock;
+    nvme_model_t   *model;
+};
+
 typedef struct {
     int                 fd;
     mock_object_kind_t  kind;
     int                 container_fd;
     int                 iommu_set;
+    lt_mock_handle_t   *owner;
 } mock_object_t;
 
+/* Every open fd across every armed instance lives here so that ioctl,
+ * close, mmap, pread and pwrite can find their owning instance from the
+ * fd alone, exactly as the kernel would route by file descriptor. Only
+ * mock_open() needs an extra hint, since it is handed a path rather than
+ * an fd; it reads that hint from arming_instance below. */
 static struct {
     pthread_mutex_t lock;
-    int             armed;
-    lt_mock_config_t config;
-    nvme_model_t   *model;
     mock_object_t   objects[MOCK_MAX_FDS];
-    char            error[256];
-} mock_state = { PTHREAD_MUTEX_INITIALIZER, 0, { NULL, 0, 0, 0, 0, NULL, NULL }, NULL, { { 0, 0, 0, 0 } }, { 0 } };
+} fd_table = { PTHREAD_MUTEX_INITIALIZER, { { 0, MOCK_OBJECT_NONE, 0, 0, NULL } } };
+
+/* Bound for the duration of lt_mock_arm() through the synchronous open
+ * sequence that immediately follows it in nvme_dev_open(), so mock_open()
+ * can tell which instance a freshly created fd belongs to. Thread local so
+ * that concurrent nvme_dev_open() calls on different threads each attach
+ * their own instance without racing this hint. */
+static __thread lt_mock_handle_t *arming_instance = NULL;
 
 void lt_mock_config_defaults(lt_mock_config_t *cfg)
 {
@@ -53,66 +67,72 @@ void lt_mock_config_defaults(lt_mock_config_t *cfg)
     cfg->model = "lantern mock nvme";
 }
 
-const char *lt_mock_last_error(void)
+lt_mock_handle_t *lt_mock_arm(const lt_mock_config_t *cfg, char *errbuf, size_t errlen)
 {
-    return mock_state.error;
-}
+    lt_mock_handle_t *handle = calloc(1, sizeof(*handle));
+    lt_mock_config_t local_cfg;
 
-int lt_mock_arm(const lt_mock_config_t *cfg)
-{
-    pthread_mutex_lock(&mock_state.lock);
-    if (mock_state.armed) {
-        pthread_mutex_unlock(&mock_state.lock);
-        errno = EBUSY;
-        return -1;
+    if (!handle) {
+        snprintf(errbuf, errlen, "Out of memory");
+        errno = ENOMEM;
+        return NULL;
     }
-    mock_state.config = *cfg;
-    mock_state.model = nvme_model_create(&mock_state.config, mock_state.error, sizeof(mock_state.error));
-    if (!mock_state.model) {
-        pthread_mutex_unlock(&mock_state.lock);
+    pthread_mutex_init(&handle->lock, NULL);
+    local_cfg = *cfg;
+    handle->model = nvme_model_create(&local_cfg, errbuf, errlen);
+    if (!handle->model) {
+        pthread_mutex_destroy(&handle->lock);
+        free(handle);
         errno = EIO;
-        return -1;
+        return NULL;
     }
-    memset(mock_state.objects, 0, sizeof(mock_state.objects));
-    mock_state.armed = 1;
-    pthread_mutex_unlock(&mock_state.lock);
-    return 0;
+    arming_instance = handle;
+    return handle;
 }
 
-void lt_mock_disarm(void)
+void lt_mock_disarm(lt_mock_handle_t *handle)
 {
-    pthread_mutex_lock(&mock_state.lock);
-    if (mock_state.model) {
-        nvme_model_destroy(mock_state.model);
-        mock_state.model = NULL;
-    }
-    mock_state.armed = 0;
-    pthread_mutex_unlock(&mock_state.lock);
+    if (!handle)
+        return;
+    if (arming_instance == handle)
+        arming_instance = NULL;
+    nvme_model_destroy(handle->model);
+    pthread_mutex_destroy(&handle->lock);
+    free(handle);
 }
 
 static mock_object_t *mock_lookup(int fd)
 {
     int i;
 
-    for (i = 0; i < MOCK_MAX_FDS; i++)
-        if (mock_state.objects[i].kind != MOCK_OBJECT_NONE && mock_state.objects[i].fd == fd)
-            return &mock_state.objects[i];
+    pthread_mutex_lock(&fd_table.lock);
+    for (i = 0; i < MOCK_MAX_FDS; i++) {
+        if (fd_table.objects[i].kind != MOCK_OBJECT_NONE && fd_table.objects[i].fd == fd) {
+            pthread_mutex_unlock(&fd_table.lock);
+            return &fd_table.objects[i];
+        }
+    }
+    pthread_mutex_unlock(&fd_table.lock);
     return NULL;
 }
 
-static int mock_track(int fd, mock_object_kind_t kind)
+static int mock_track(int fd, mock_object_kind_t kind, lt_mock_handle_t *owner)
 {
     int i;
 
+    pthread_mutex_lock(&fd_table.lock);
     for (i = 0; i < MOCK_MAX_FDS; i++) {
-        if (mock_state.objects[i].kind == MOCK_OBJECT_NONE) {
-            mock_state.objects[i].fd = fd;
-            mock_state.objects[i].kind = kind;
-            mock_state.objects[i].container_fd = -1;
-            mock_state.objects[i].iommu_set = 0;
+        if (fd_table.objects[i].kind == MOCK_OBJECT_NONE) {
+            fd_table.objects[i].fd = fd;
+            fd_table.objects[i].kind = kind;
+            fd_table.objects[i].container_fd = -1;
+            fd_table.objects[i].iommu_set = 0;
+            fd_table.objects[i].owner = owner;
+            pthread_mutex_unlock(&fd_table.lock);
             return 0;
         }
     }
+    pthread_mutex_unlock(&fd_table.lock);
     return -1;
 }
 
@@ -125,6 +145,7 @@ static int mock_open(const char *path, int flags)
 {
     int fd;
     mock_object_kind_t kind;
+    lt_mock_handle_t *owner;
     char group_path[64];
 
     (void)flags;
@@ -139,36 +160,28 @@ static int mock_open(const char *path, int flags)
         return -1;
     }
 
-    pthread_mutex_lock(&mock_state.lock);
-    if (!mock_state.armed) {
-        pthread_mutex_unlock(&mock_state.lock);
+    owner = arming_instance;
+    if (!owner) {
         errno = ENODEV;
         return -1;
     }
     fd = mock_new_fd();
-    if (fd < 0) {
-        pthread_mutex_unlock(&mock_state.lock);
+    if (fd < 0)
         return -1;
-    }
-    if (mock_track(fd, kind) != 0) {
+    if (mock_track(fd, kind, owner) != 0) {
         close(fd);
-        pthread_mutex_unlock(&mock_state.lock);
         errno = EMFILE;
         return -1;
     }
-    pthread_mutex_unlock(&mock_state.lock);
     return fd;
 }
 
 static int mock_close(int fd)
 {
-    mock_object_t *obj;
+    mock_object_t *obj = mock_lookup(fd);
 
-    pthread_mutex_lock(&mock_state.lock);
-    obj = mock_lookup(fd);
     if (obj)
         obj->kind = MOCK_OBJECT_NONE;
-    pthread_mutex_unlock(&mock_state.lock);
     return close(fd);
 }
 
@@ -216,7 +229,7 @@ static int mock_ioctl_container(mock_object_t *obj, unsigned long request, void 
             errno = EINVAL;
             return -1;
         }
-        return nvme_model_dma_map(mock_state.model, map->iova, map->vaddr, map->size);
+        return nvme_model_dma_map(obj->owner->model, map->iova, map->vaddr, map->size);
     }
 
     case VFIO_IOMMU_UNMAP_DMA: {
@@ -225,7 +238,7 @@ static int mock_ioctl_container(mock_object_t *obj, unsigned long request, void 
             errno = EINVAL;
             return -1;
         }
-        if (nvme_model_dma_unmap(mock_state.model, unmap->iova, unmap->size) != 0)
+        if (nvme_model_dma_unmap(obj->owner->model, unmap->iova, unmap->size) != 0)
             return -1;
         return 0;
     }
@@ -280,7 +293,7 @@ static int mock_ioctl_group(mock_object_t *obj, unsigned long request, void *arg
         fd = mock_new_fd();
         if (fd < 0)
             return -1;
-        if (mock_track(fd, MOCK_OBJECT_DEVICE) != 0) {
+        if (mock_track(fd, MOCK_OBJECT_DEVICE, obj->owner) != 0) {
             close(fd);
             errno = EMFILE;
             return -1;
@@ -296,8 +309,6 @@ static int mock_ioctl_group(mock_object_t *obj, unsigned long request, void *arg
 
 static int mock_ioctl_device(mock_object_t *obj, unsigned long request, void *arg)
 {
-    (void)obj;
-
     switch (request) {
     case VFIO_DEVICE_GET_INFO: {
         struct vfio_device_info *info = arg;
@@ -321,13 +332,13 @@ static int mock_ioctl_device(mock_object_t *obj, unsigned long request, void *ar
         if (info->index == VFIO_PCI_BAR0_REGION_INDEX) {
             info->flags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE |
                           VFIO_REGION_INFO_FLAG_MMAP;
-            info->size = nvme_model_bar_size(mock_state.model);
+            info->size = nvme_model_bar_size(obj->owner->model);
             info->offset = MOCK_BAR0_REGION_OFFSET;
             return 0;
         }
         if (info->index == VFIO_PCI_CONFIG_REGION_INDEX) {
             info->flags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
-            info->size = nvme_model_config_size(mock_state.model);
+            info->size = nvme_model_config_size(obj->owner->model);
             info->offset = MOCK_CONFIG_REGION_OFFSET;
             return 0;
         }
@@ -368,18 +379,18 @@ static int mock_ioctl_device(mock_object_t *obj, unsigned long request, void *ar
             return -1;
         }
         if (set->flags & VFIO_IRQ_SET_DATA_NONE) {
-            return nvme_model_set_msix(mock_state.model, set->start, set->count, NULL);
+            return nvme_model_set_msix(obj->owner->model, set->start, set->count, NULL);
         }
         if (set->flags & VFIO_IRQ_SET_DATA_EVENTFD) {
             const int32_t *fds = (const int32_t *)set->data;
-            return nvme_model_set_msix(mock_state.model, set->start, set->count, fds);
+            return nvme_model_set_msix(obj->owner->model, set->start, set->count, fds);
         }
         errno = EINVAL;
         return -1;
     }
 
     case VFIO_DEVICE_RESET:
-        nvme_model_device_reset(mock_state.model);
+        nvme_model_device_reset(obj->owner->model);
         return 0;
 
     default:
@@ -390,16 +401,16 @@ static int mock_ioctl_device(mock_object_t *obj, unsigned long request, void *ar
 
 static int mock_ioctl(int fd, unsigned long request, void *arg)
 {
-    mock_object_t *obj;
+    mock_object_t *obj = mock_lookup(fd);
+    lt_mock_handle_t *owner;
     int rc;
 
-    pthread_mutex_lock(&mock_state.lock);
-    obj = mock_lookup(fd);
     if (!obj) {
-        pthread_mutex_unlock(&mock_state.lock);
         errno = EBADF;
         return -1;
     }
+    owner = obj->owner;
+    pthread_mutex_lock(&owner->lock);
     switch (obj->kind) {
     case MOCK_OBJECT_CONTAINER:
         rc = mock_ioctl_container(obj, request, arg);
@@ -415,7 +426,7 @@ static int mock_ioctl(int fd, unsigned long request, void *arg)
         rc = -1;
         break;
     }
-    pthread_mutex_unlock(&mock_state.lock);
+    pthread_mutex_unlock(&owner->lock);
     return rc;
 }
 
@@ -428,21 +439,20 @@ static void *mock_mmap(void *addr, size_t length, int prot, int flags, int fd, o
     (void)prot;
     (void)flags;
 
-    pthread_mutex_lock(&mock_state.lock);
     obj = mock_lookup(fd);
     if (!obj || obj->kind != MOCK_OBJECT_DEVICE) {
-        pthread_mutex_unlock(&mock_state.lock);
         errno = EACCES;
         return MAP_FAILED;
     }
+    pthread_mutex_lock(&obj->owner->lock);
     if ((uint64_t)offset != MOCK_BAR0_REGION_OFFSET ||
-        length > nvme_model_bar_size(mock_state.model)) {
-        pthread_mutex_unlock(&mock_state.lock);
+        length > nvme_model_bar_size(obj->owner->model)) {
+        pthread_mutex_unlock(&obj->owner->lock);
         errno = EINVAL;
         return MAP_FAILED;
     }
-    bar = nvme_model_bar(mock_state.model);
-    pthread_mutex_unlock(&mock_state.lock);
+    bar = nvme_model_bar(obj->owner->model);
+    pthread_mutex_unlock(&obj->owner->lock);
     return bar;
 }
 
@@ -458,22 +468,21 @@ static ssize_t mock_pread(int fd, void *buf, size_t count, off_t offset)
     mock_object_t *obj;
     uint64_t region_offset;
 
-    pthread_mutex_lock(&mock_state.lock);
     obj = mock_lookup(fd);
     if (!obj || obj->kind != MOCK_OBJECT_DEVICE) {
-        pthread_mutex_unlock(&mock_state.lock);
         errno = EBADF;
         return -1;
     }
+    pthread_mutex_lock(&obj->owner->lock);
     region_offset = (uint64_t)offset - MOCK_CONFIG_REGION_OFFSET;
     if ((uint64_t)offset < MOCK_CONFIG_REGION_OFFSET ||
-        region_offset + count > nvme_model_config_size(mock_state.model)) {
-        pthread_mutex_unlock(&mock_state.lock);
+        region_offset + count > nvme_model_config_size(obj->owner->model)) {
+        pthread_mutex_unlock(&obj->owner->lock);
         errno = EINVAL;
         return -1;
     }
-    memcpy(buf, nvme_model_config_space(mock_state.model) + region_offset, count);
-    pthread_mutex_unlock(&mock_state.lock);
+    memcpy(buf, nvme_model_config_space(obj->owner->model) + region_offset, count);
+    pthread_mutex_unlock(&obj->owner->lock);
     return (ssize_t)count;
 }
 
@@ -482,22 +491,21 @@ static ssize_t mock_pwrite(int fd, const void *buf, size_t count, off_t offset)
     mock_object_t *obj;
     uint64_t region_offset;
 
-    pthread_mutex_lock(&mock_state.lock);
     obj = mock_lookup(fd);
     if (!obj || obj->kind != MOCK_OBJECT_DEVICE) {
-        pthread_mutex_unlock(&mock_state.lock);
         errno = EBADF;
         return -1;
     }
+    pthread_mutex_lock(&obj->owner->lock);
     region_offset = (uint64_t)offset - MOCK_CONFIG_REGION_OFFSET;
     if ((uint64_t)offset < MOCK_CONFIG_REGION_OFFSET ||
-        region_offset + count > nvme_model_config_size(mock_state.model)) {
-        pthread_mutex_unlock(&mock_state.lock);
+        region_offset + count > nvme_model_config_size(obj->owner->model)) {
+        pthread_mutex_unlock(&obj->owner->lock);
         errno = EINVAL;
         return -1;
     }
-    memcpy(nvme_model_config_space(mock_state.model) + region_offset, buf, count);
-    pthread_mutex_unlock(&mock_state.lock);
+    memcpy(nvme_model_config_space(obj->owner->model) + region_offset, buf, count);
+    pthread_mutex_unlock(&obj->owner->lock);
     return (ssize_t)count;
 }
 
