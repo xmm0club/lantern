@@ -1,3 +1,5 @@
+open Lantern
+
 let checks = ref 0
 let failures = ref 0
 

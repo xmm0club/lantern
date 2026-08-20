@@ -1,3 +1,5 @@
+open Lantern
+
 external run : string -> string -> int -> int = "lantern_selftest_entry"
 
 let () =

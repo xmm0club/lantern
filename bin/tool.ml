@@ -1,3 +1,5 @@
+open Lantern
+
 let exit_usage = 2
 let exit_failure = 1
 
