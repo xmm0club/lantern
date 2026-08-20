@@ -12,6 +12,8 @@ let string_of_error = function
   | Timeout what -> Printf.sprintf "Timed out waiting for %s" what
   | Bad_argument what -> Printf.sprintf "Invalid request: %s" what
 
+type 'a result = ('a, error) Stdlib.result
+
 type transport = Vfio | Mock
 
 type config = {
