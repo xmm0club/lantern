@@ -47,6 +47,11 @@ let set_prp2 sqe iova =
   set_dword sqe 8 (Int64.to_int32 iova);
   set_dword sqe 9 (Int64.to_int32 (Int64.shift_right_logical iova 32))
 
+let prp1 sqe =
+  Int64.logor
+    (Int64.logand (Int64.of_int32 (get_dword sqe 6)) 0xffffffffL)
+    (Int64.shift_left (Int64.logand (Int64.of_int32 (get_dword sqe 7)) 0xffffffffL) 32)
+
 let prp2 sqe =
   Int64.logor
     (Int64.logand (Int64.of_int32 (get_dword sqe 8)) 0xffffffffL)

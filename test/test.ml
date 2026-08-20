@@ -374,6 +374,89 @@ let four_kilobyte_namespace_tests () =
            | Some readback -> check "Large block round trip matches" (Bytes.equal payload readback));
           ignore (expect_ok "Delete queue" (Nvme.delete_io_queue device queue))))
 
+(* Exercises nvme_prp_build directly through the raw Ffi binding, since the
+   PRP list only kicks in for transfers spanning more than two pages and the
+   ordinary read/write round trip tests above never land exactly on a page
+   boundary. offset_for_first picks the buffer offset needed to make the
+   transfer start a chosen number of bytes short of the next page, so each
+   case below lands on its boundary regardless of where the mock backend
+   happened to place the underlying buffer's IOVA. *)
+let prp_boundary_tests () =
+  section "PRP list boundaries";
+  let page = Ffi.page_size in
+  let config = { Ffi.default_config with mock_image_path = "prp.img" } in
+  match Ffi.dev_open Defaults.bdf config with
+  | Error message -> check ("Open device for PRP tests :: " ^ message) false
+  | Ok device -> (
+    let state = Ffi.dev_state device in
+    let max_transfer = state.Ffi.max_transfer_bytes in
+    match Ffi.dma_alloc device (max_transfer + (2 * page)) with
+    | Error message -> check ("Allocate PRP test buffer :: " ^ message) false
+    | Ok buffer ->
+      let base_iova = Ffi.dma_iova device buffer in
+      let page64 = Int64.of_int page in
+
+      (* Offset so that (base_iova + offset) leaves exactly `want_first`
+         bytes before the next page boundary, matching nvme_prp_build's own
+         `first = NVME_PAGE_SIZE - (base & NVME_PAGE_MASK)` computation. *)
+      let offset_for_first want_first =
+        let target_mod = Int64.of_int (page - want_first) in
+        let base_mod = Int64.rem base_iova page64 in
+        let delta = Int64.sub target_mod base_mod in
+        let delta = if Int64.compare delta 0L < 0 then Int64.add delta page64 else delta in
+        Int64.to_int delta
+      in
+
+      let run ~qid ~cid ~offset ~len =
+        let sqe = Bytes.make Ffi.sqe_bytes '\000' in
+        let rc = Ffi.prp_build device qid cid buffer offset len sqe in
+        (rc, sqe)
+      in
+      let expected_prp1 offset = Int64.add base_iova (Int64.of_int offset) in
+
+      let offset = offset_for_first page in
+      let first = page in
+      let rc, sqe = run ~qid:0 ~cid:0 ~offset ~len:first in
+      check "Transfer ending exactly on a page boundary succeeds" (rc = Ffi.ok);
+      check "... PRP1 points at the transfer start" (Cmd.prp1 sqe = expected_prp1 offset);
+      check "... uses PRP1 only, no PRP2" (Cmd.prp2 sqe = 0L);
+
+      let rc, sqe = run ~qid:0 ~cid:0 ~offset ~len:(first + page) in
+      check "Transfer of exactly two pages succeeds" (rc = Ffi.ok);
+      check "... PRP1 points at the transfer start" (Cmd.prp1 sqe = expected_prp1 offset);
+      check "... PRP2 points directly at the second page, not a list"
+        (Cmd.prp2 sqe = Int64.add base_iova (Int64.of_int (offset + first)));
+
+      let rc, sqe = run ~qid:0 ~cid:0 ~offset ~len:(first + page + 1) in
+      check "Transfer one byte past two pages succeeds via the PRP list" (rc = Ffi.ok);
+      check "... PRP1 points at the transfer start" (Cmd.prp1 sqe = expected_prp1 offset);
+      check "... PRP2 points at the per-command list page, not raw data"
+        (Cmd.prp2 sqe <> Int64.add base_iova (Int64.of_int (offset + first)));
+
+      let max_offset = offset_for_first 1 in
+      let rc, sqe = run ~qid:0 ~cid:0 ~offset:max_offset ~len:max_transfer in
+      check "Transfer needing the full 512 entry PRP list succeeds" (rc = Ffi.ok);
+      check "... PRP1 points at the transfer start" (Cmd.prp1 sqe = expected_prp1 max_offset);
+      check "... still uses the list, not a direct PRP2"
+        (Cmd.prp2 sqe <> Int64.add base_iova (Int64.of_int (max_offset + 1)));
+
+      let rc, _ = run ~qid:0 ~cid:0 ~offset:max_offset ~len:(max_transfer + 1) in
+      check "Transfer one byte past the maximum is rejected" (rc = Ffi.err_range);
+
+      let rc, _ = run ~qid:0 ~cid:0 ~offset:0 ~len:0 in
+      check "Zero length transfer is rejected" (rc = Ffi.err_range);
+
+      let rc, _ = run ~qid:0 ~cid:0 ~offset:(max_transfer + (2 * page)) ~len:1 in
+      check "Offset past the end of the buffer is rejected" (rc = Ffi.err_range);
+
+      let rc, _ = run ~qid:1000 ~cid:0 ~offset:0 ~len:page in
+      check "Out of range queue id is rejected" (rc = Ffi.err_invalid);
+
+      let rc, _ = run ~qid:0 ~cid:1000 ~offset:0 ~len:page in
+      check "Out of range command id is rejected" (rc = Ffi.err_invalid);
+
+      ignore (Ffi.dev_close device))
+
 let () =
   Printf.printf "lantern OCaml test suite\n%!";
   pure_status_tests ();
@@ -386,5 +469,6 @@ let () =
   interrupt_tests ();
   reset_tests ();
   four_kilobyte_namespace_tests ();
+  prp_boundary_tests ();
   Printf.printf "\n%d checks, %d failures\n%!" !checks !failures;
   exit (if !failures = 0 then 0 else 1)
