@@ -4,7 +4,7 @@ set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="${LANTERN_SCRATCH:-$PROJECT_ROOT/_scratch}"
 SKIP_QEMU="${LANTERN_SKIP_QEMU:-0}"
-BDF="0000:00:04.0"
+BDF="$(sed -n '1p' "$PROJECT_ROOT/test/defaults.env")"
 TOOL="$PROJECT_ROOT/_build/default/bin/tool.exe"
 IMAGE="$SCRATCH/cli.img"
 stages_run=0

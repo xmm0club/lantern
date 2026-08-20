@@ -6,6 +6,8 @@ type error =
 
 val string_of_error : error -> string
 
+type 'a result = ('a, error) Stdlib.result
+
 type transport = Vfio | Mock
 
 type config = {
@@ -27,9 +29,9 @@ type t
 type queue
 type request
 
-val open_device : ?config:config -> string -> (t, error) result
+val open_device : ?config:config -> string -> t result
 val close : t -> unit
-val reset : t -> (unit, error) result
+val reset : t -> unit result
 
 val bdf : t -> string
 val backend_name : t -> string
@@ -37,15 +39,15 @@ val interrupts_enabled : t -> bool
 val registers : t -> Ffi.dev_state
 val queue_registers : t -> int -> Ffi.queue_state
 
-val identify_controller : t -> (Id.controller, error) result
-val identify_namespace : t -> nsid:int -> (Id.namespace, error) result
-val active_namespaces : t -> (int list, error) result
-val smart_log : t -> (Id.smart, error) result
-val block_size_of : t -> nsid:int -> (int, error) result
-val set_number_of_queues : t -> submission:int -> completion:int -> (int * int, error) result
+val identify_controller : t -> Id.controller result
+val identify_namespace : t -> nsid:int -> Id.namespace result
+val active_namespaces : t -> int list result
+val smart_log : t -> Id.smart result
+val block_size_of : t -> nsid:int -> int result
+val set_number_of_queues : t -> submission:int -> completion:int -> (int * int) result
 
-val create_io_queue : ?depth:int -> ?slot_bytes:int -> t -> (queue, error) result
-val delete_io_queue : t -> queue -> (unit, error) result
+val create_io_queue : ?depth:int -> ?slot_bytes:int -> t -> queue result
+val delete_io_queue : t -> queue -> unit result
 val admin_queue : t -> queue
 val io_queues : t -> queue list
 
@@ -56,20 +58,20 @@ val queue_outstanding : queue -> int
 val queue_slot_bytes : queue -> int
 
 val read_blocks :
-  ?timeout_ms:int -> t -> queue -> nsid:int -> lba:int64 -> blocks:int -> (Bytes.t, error) result
+  ?timeout_ms:int -> t -> queue -> nsid:int -> lba:int64 -> blocks:int -> Bytes.t result
 
 val write_blocks :
-  ?timeout_ms:int -> t -> queue -> nsid:int -> lba:int64 -> data:Bytes.t -> (unit, error) result
+  ?timeout_ms:int -> t -> queue -> nsid:int -> lba:int64 -> data:Bytes.t -> unit result
 
 val write_zeroes :
-  ?timeout_ms:int -> t -> queue -> nsid:int -> lba:int64 -> blocks:int -> (unit, error) result
+  ?timeout_ms:int -> t -> queue -> nsid:int -> lba:int64 -> blocks:int -> unit result
 
-val flush : ?timeout_ms:int -> t -> queue -> nsid:int -> (unit, error) result
+val flush : ?timeout_ms:int -> t -> queue -> nsid:int -> unit result
 
-val create_namespace : t -> blocks:int64 -> lba_format:int -> (int, error) result
-val delete_namespace : t -> nsid:int -> (unit, error) result
-val attach_namespace : t -> nsid:int -> (unit, error) result
-val detach_namespace : t -> nsid:int -> (unit, error) result
+val create_namespace : t -> blocks:int64 -> lba_format:int -> int result
+val delete_namespace : t -> nsid:int -> unit result
+val attach_namespace : t -> nsid:int -> unit result
+val detach_namespace : t -> nsid:int -> unit result
 
 val request_command_id : request -> int
 val request_status : request -> Status.decoded option
@@ -86,12 +88,12 @@ module Pipeline : sig
   val slot_length : slot -> int
 
   val submit_read :
-    t -> queue -> nsid:int -> lba:int64 -> blocks:int -> block_bytes:int -> (slot, error) result
+    t -> queue -> nsid:int -> lba:int64 -> blocks:int -> block_bytes:int -> slot result
 
   val submit_write :
     ?payload:Bytes.t ->
-    t -> queue -> nsid:int -> lba:int64 -> blocks:int -> block_bytes:int -> (slot, error) result
+    t -> queue -> nsid:int -> lba:int64 -> blocks:int -> block_bytes:int -> slot result
 
-  val reap : t -> queue -> int -> ((request * float) option, error) result
-  val read_slot : t -> queue -> slot -> (Bytes.t, error) result
+  val reap : t -> queue -> int -> (request * float) option result
+  val read_slot : t -> queue -> slot -> Bytes.t result
 end
