@@ -1,4 +1,6 @@
-open Lantern
+module Ffi = Lantern.Ffi
+module Id = Lantern.Id
+module Nvme = Lantern.Nvme
 
 let exit_usage = 2
 let exit_failure = 1
